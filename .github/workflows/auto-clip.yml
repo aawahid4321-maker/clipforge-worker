@@ -1,0 +1,146 @@
+# ClipForge server auto-clip — FREE tier only.
+#
+# Triggered by the Cloudflare Worker (repository_dispatch, type
+# "auto-clip") when a user pastes a YouTube link into ClipForge and
+# taps "Auto clip from link". The workflow downloads the video,
+# finds the loudest moments and cuts vertical 1080x1920 MP4 clips,
+# then publishes them on a GitHub Release tagged job-<job_id>, so
+# the Worker (and the page) can fetch stable download links.
+#
+# A manual run (workflow_dispatch) is also supported for testing.
+#
+# Free-tier notes:
+# - GitHub Actions free: 2,000 minutes/month on the free plan.
+# - A VOD job usually takes 2-8 minutes (audio download + analysis
+#   + section cuts). A live-stream job downloads up to 2 hours of
+#   video first, so it takes longer — watch the minutes budget.
+# - YouTube sometimes blocks datacenter IPs ("Sign in to confirm
+#   you're not a bot"). When yt-dlp fails, the job writes error.txt
+#   and the Worker reports that error back to the page.
+
+name: ClipForge Auto Clip
+
+on:
+  repository_dispatch:
+    types: [auto-clip]
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Job id (must match cf-[a-z0-9-]+)"
+        required: true
+        type: string
+      url:
+        description: "YouTube watch / live / shorts URL"
+        required: true
+        type: string
+      clip_length:
+        description: "Clip length in seconds"
+        required: false
+        default: "30"
+        type: string
+      count:
+        description: "How many clips"
+        required: false
+        default: "3"
+        type: string
+
+permissions:
+  contents: write
+
+run-name: auto-clip ${{ github.event.client_payload.job_id || github.event.inputs.job_id }}
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      JOB_ID: ${{ github.event.client_payload.job_id || github.event.inputs.job_id }}
+      CLIP_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
+      CLIP_LEN: ${{ github.event.client_payload.clip_length || github.event.inputs.clip_length || '30' }}
+      CLIP_COUNT: ${{ github.event.client_payload.count || github.event.inputs.count || '3' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Validate job id
+        run: |
+          if ! [[ "$JOB_ID" =~ ^cf-[a-z0-9-]+$ ]]; then
+            echo "Bad job_id: $JOB_ID" >&2
+            exit 1
+          fi
+          case "$CLIP_URL" in
+            http://*|https://*) ;;
+            *) echo "Bad URL: $CLIP_URL" >&2; exit 1 ;;
+          esac
+
+      - name: Install ffmpeg + yt-dlp
+        run: |
+          which ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+          which yt-dlp || pipx install yt-dlp
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          ffmpeg -version | head -1
+          yt-dlp --version
+
+      - name: Auto clip
+        run: |
+          python3 scripts/auto_clip.py \
+            --url "$CLIP_URL" \
+            --job-id "$JOB_ID" \
+            --clip-length "${CLIP_LEN:-30}" \
+            --count "${CLIP_COUNT:-3}" \
+            --out clips
+
+      - name: Upload clips as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clips-${{ env.JOB_ID }}
+          path: clips/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Publish release with clips
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls clips/clip-*.mp4
+          gh release create "job-$JOB_ID" \
+            clips/clip-*.mp4 clips/moments.json clips/job.json \
+            --title "ClipForge job $JOB_ID" \
+            --notes "Auto-clipped from $CLIP_URL"
+
+      - name: Publish error release on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f clips/error.txt ]; then
+            mkdir -p clips
+            echo "Job failed — see the run log: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > clips/error.txt
+          fi
+          gh release create "job-$JOB_ID" \
+            clips/error.txt \
+            --title "ClipForge job $JOB_ID (failed)" \
+            --notes "See error.txt for the reason."
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## ClipForge job $JOB_ID"
+            echo ""
+            echo "- URL: $CLIP_URL"
+            echo "- Clip length: ${CLIP_LEN:-30}s, count: ${CLIP_COUNT:-3}"
+            echo "- Release: job-$JOB_ID"
+            if [ -f clips/job.json ]; then
+              echo ""
+              echo "### Moments"
+              python3 -c "import json; [print('- %s → %s (energy %s)' % (m['start'], m['end'], m['energy'])) for m in json.load(open('clips/job.json'))['moments']]"
+            fi
+            if [ -f clips/error.txt ]; then
+              echo ""
+              echo "### Error"
+              cat clips/error.txt
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
