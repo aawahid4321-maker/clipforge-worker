@@ -251,8 +251,11 @@ def main():
         audio_path = "live.mp4"
     else:
         log("Downloading audio only for analysis")
+        # 48 kbps is plenty: the analysis only needs per-second
+        # loudness, not listening quality, and the smaller file
+        # downloads roughly twice as fast as 96 kbps.
         try:
-            run(["yt-dlp", "-f", "ba[abr<=96]/ba", "--no-playlist",
+            run(["yt-dlp", "-f", "ba[abr<=48]/ba", "--no-playlist",
                  "-o", "audio.%(ext)s", args.url])
         except subprocess.CalledProcessError:
             fail(outdir, "Could not download this video's audio (yt-dlp failed — "
