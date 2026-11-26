@@ -22,7 +22,11 @@ import sys
 # ("Sign in to confirm you're not a bot"). The Android player
 # client usually gets through where the web client is blocked,
 # so every yt-dlp call asks for it first, falling back to web.
-YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=android,web"]
+# Bot-block bypass: yt-dlp tries these YouTube player clients in order
+# and uses the first that returns a usable player response. android+web
+# alone failed 26 Nov (8 straight failures); ios and tv_embedded are the
+# two other clients that historically dodge the datacenter bot-check.
+YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=android,ios,tv_embedded,web"]
 
 YOUTUBE_RE = re.compile(r"^https?://(www\.|m\.)?(youtube\.com|youtu\.be)/")
 
