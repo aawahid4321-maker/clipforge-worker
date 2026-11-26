@@ -28,6 +28,18 @@ import sys
 # two other clients that historically dodge the datacenter bot-check.
 YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=android,ios,tv_embedded,web"]
 
+# Cookies (optional): a Netscape cookies.txt for youtube.com, exported
+# from a signed-in browser, makes YouTube treat the request as that
+# user instead of anonymous datacenter traffic — the one thing the
+# player-client bypass could not do. The file comes from the YT_COOKIES
+# repo secret (never committed, never logged); without it the calls run
+# exactly as before.
+def cookies_args(path):
+    if path and os.path.isfile(path):
+        log("Using YouTube cookies file: " + path)
+        return ["--cookies", path]
+    return []
+
 YOUTUBE_RE = re.compile(r"^https?://(www\.|m\.)?(youtube\.com|youtu\.be)/")
 
 
@@ -217,6 +229,7 @@ def main():
     ap.add_argument("--clip-length", type=int, default=30)
     ap.add_argument("--count", type=int, default=3)
     ap.add_argument("--out", default="clips")
+    ap.add_argument("--cookies", default="cookies.txt")
     args = ap.parse_args()
 
     clip_len = max(5, min(600, args.clip_length))
@@ -227,9 +240,13 @@ def main():
     if not YOUTUBE_RE.match(args.url):
         fail(outdir, "Not a YouTube link: " + args.url[:120])
 
+    # Cookies (if the file exists) make YouTube treat the request as a
+    # signed-in user instead of anonymous datacenter traffic.
+    ck = cookies_args(args.cookies)
+
     try:
         info = json.loads(subprocess.check_output(
-            ["yt-dlp"] + YT_EXTRACTOR_ARGS +
+            ["yt-dlp"] + YT_EXTRACTOR_ARGS + ck +
             ["-j", "--skip-download", "--no-playlist",
              "--no-warnings", args.url], text=True))
     except subprocess.CalledProcessError:
@@ -249,7 +266,7 @@ def main():
                      "start were used.")
         log("Live stream detected — downloading the first 2 hours from the start")
         try:
-            run(["yt-dlp"] + YT_EXTRACTOR_ARGS + ["--live-from-start",
+            run(["yt-dlp"] + YT_EXTRACTOR_ARGS + ck + ["--live-from-start",
                  "--download-sections", "*00:00:00-02:00:00",
                  "-f", "bv*[height<=720]+ba/b[height<=720]",
                  "--merge-output-format", "mp4",
@@ -266,7 +283,7 @@ def main():
         # loudness, not listening quality, and the smaller file
         # downloads roughly twice as fast as 96 kbps.
         try:
-            run(["yt-dlp"] + YT_EXTRACTOR_ARGS +
+            run(["yt-dlp"] + YT_EXTRACTOR_ARGS + ck +
                 ["-f", "ba[abr<=48]/ba", "--no-playlist",
                  "-o", "audio.%(ext)s", args.url])
         except subprocess.CalledProcessError:
@@ -306,7 +323,7 @@ def main():
     else:
         try:
             urls = subprocess.check_output(
-                ["yt-dlp"] + YT_EXTRACTOR_ARGS + ["-g",
+                ["yt-dlp"] + YT_EXTRACTOR_ARGS + ck + ["-g",
                  "-f", "bv*[height<=1080]+ba/b[height<=1080]",
                  "--no-playlist", args.url], text=True).strip().splitlines()
         except subprocess.CalledProcessError:
