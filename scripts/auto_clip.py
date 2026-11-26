@@ -18,15 +18,95 @@ import struct
 import subprocess
 import sys
 
-# YouTube now blocks plain yt-dlp requests from datacenter IPs
-# ("Sign in to confirm you're not a bot"). The Android player
-# client usually gets through where the web client is blocked,
-# so every yt-dlp call asks for it first, falling back to web.
-# Bot-block bypass: yt-dlp tries these YouTube player clients in order
-# and uses the first that returns a usable player response. android+web
-# alone failed 26 Nov (8 straight failures); ios and tv_embedded are the
-# two other clients that historically dodge the datacenter bot-check.
-YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=android,ios,tv_embedded,web"]
+# YouTube blocks plain yt-dlp requests from datacenter IPs
+# ("Sign in to confirm you're not a bot"). Which player client gets
+# through changes over time, so every yt-dlp call tries these combos
+# in order and uses the first that works. The working combo is cached
+# after the first success so later calls don't re-probe.
+# History: android+web failed 26 Nov, then android,ios,tv_embedded,web
+# failed 10 straight runs (26-27 Nov) on two different videos, while
+# the same Rick Astley link returned a stream URL from a
+# non-datacenter IP — so the block is IP-based and client rotation
+# is the code-only lever left. web_safari / web_creator / mweb / tv /
+# android_vr / visionos were never tried before; player_skip
+# =webpage,configs is a variant that skips the (blocked) webpage fetch.
+YT_CLIENT_COMBOS = [
+    ["youtube:player_client=web_safari"],
+    ["youtube:player_client=web_creator"],
+    ["youtube:player_client=mweb"],
+    ["youtube:player_client=tv"],
+    ["youtube:player_client=android_vr"],
+    ["youtube:player_client=visionos"],
+    ["youtube:player_client=android"],
+    ["youtube:player_client=ios"],
+    ["youtube:player_client=tv_embedded"],
+    ["youtube:player_client=web"],
+    ["youtube:player_client=android,ios,tv_embedded,web"],
+    ["youtube:player_client=web", "youtube:player_skip=webpage,configs"],
+    ["youtube:player_client=web_safari", "youtube:player_skip=webpage,configs"],
+    ["youtube:player_client=web_safari,web_creator,mweb,tv,android_vr,visionos,android,ios,tv_embedded,web"],
+]
+_WORKING_COMBO = None
+
+
+def _extractor_args(combo):
+    out = []
+    for item in combo:
+        out += ["--extractor-args", item]
+    return out
+
+
+def _combo_label(combo):
+    return " + ".join(combo)
+
+
+def _combos_to_try():
+    # Try the cached working combo first, then every combo in order.
+    if _WORKING_COMBO is not None:
+        return [_WORKING_COMBO] + [c for c in YT_CLIENT_COMBOS if c != _WORKING_COMBO]
+    return list(YT_CLIENT_COMBOS)
+
+
+def ytdlp_check_output(args, cookies):
+    """Run yt-dlp (output-capturing call) trying each player-client
+    combo until one succeeds. Returns stdout text. Raises
+    CalledProcessError if every combo fails. Caches the working
+    combo for later calls."""
+    global _WORKING_COMBO
+    last_err = None
+    for combo in _combos_to_try():
+        cmd = ["yt-dlp"] + _extractor_args(combo) + cookies + args
+        log("$ " + " ".join(cmd))
+        try:
+            out = subprocess.check_output(cmd, text=True)
+        except subprocess.CalledProcessError as e:
+            last_err = e
+            log("player client failed: " + _combo_label(combo))
+            continue
+        _WORKING_COMBO = combo
+        log("player client OK: " + _combo_label(combo))
+        return out
+    raise last_err
+
+
+def ytdlp_run(args, cookies):
+    """Same as ytdlp_check_output but for download calls that need no
+    captured output. Raises CalledProcessError if every combo fails."""
+    global _WORKING_COMBO
+    last_err = None
+    for combo in _combos_to_try():
+        cmd = ["yt-dlp"] + _extractor_args(combo) + cookies + args
+        log("$ " + " ".join(cmd))
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            last_err = e
+            log("player client failed: " + _combo_label(combo))
+            continue
+        _WORKING_COMBO = combo
+        log("player client OK: " + _combo_label(combo))
+        return
+    raise last_err
 
 # Cookies (optional): a Netscape cookies.txt for youtube.com, exported
 # from a signed-in browser, makes YouTube treat the request as that
@@ -245,10 +325,9 @@ def main():
     ck = cookies_args(args.cookies)
 
     try:
-        info = json.loads(subprocess.check_output(
-            ["yt-dlp"] + YT_EXTRACTOR_ARGS + ck +
+        info = json.loads(ytdlp_check_output(
             ["-j", "--skip-download", "--no-playlist",
-             "--no-warnings", args.url], text=True))
+             "--no-warnings", args.url], ck))
     except subprocess.CalledProcessError:
         fail(outdir, "Could not read this YouTube link (yt-dlp failed — the video "
                      "may be private, removed, or YouTube is blocking downloads "
@@ -266,11 +345,11 @@ def main():
                      "start were used.")
         log("Live stream detected — downloading the first 2 hours from the start")
         try:
-            run(["yt-dlp"] + YT_EXTRACTOR_ARGS + ck + ["--live-from-start",
-                 "--download-sections", "*00:00:00-02:00:00",
-                 "-f", "bv*[height<=720]+ba/b[height<=720]",
-                 "--merge-output-format", "mp4",
-                 "--no-playlist", "-o", "live.mp4", args.url])
+            ytdlp_run(["--live-from-start",
+                       "--download-sections", "*00:00:00-02:00:00",
+                       "-f", "bv*[height<=720]+ba/b[height<=720]",
+                       "--merge-output-format", "mp4",
+                       "--no-playlist", "-o", "live.mp4", args.url], ck)
         except subprocess.CalledProcessError:
             fail(outdir, "Could not download the live stream (YouTube may be "
                          "blocking downloads right now). Try again later, or "
@@ -283,9 +362,8 @@ def main():
         # loudness, not listening quality, and the smaller file
         # downloads roughly twice as fast as 96 kbps.
         try:
-            run(["yt-dlp"] + YT_EXTRACTOR_ARGS + ck +
-                ["-f", "ba[abr<=48]/ba", "--no-playlist",
-                 "-o", "audio.%(ext)s", args.url])
+            ytdlp_run(["-f", "ba[abr<=48]/ba", "--no-playlist",
+                       "-o", "audio.%(ext)s", args.url], ck)
         except subprocess.CalledProcessError:
             fail(outdir, "Could not download this video's audio (yt-dlp failed — "
                          "YouTube may be blocking downloads right now). Try "
@@ -322,10 +400,10 @@ def main():
             clips_meta.append({"file": "clip-%d.mp4" % i, "start": s, "end": e})
     else:
         try:
-            urls = subprocess.check_output(
-                ["yt-dlp"] + YT_EXTRACTOR_ARGS + ck + ["-g",
+            urls = ytdlp_check_output(
+                ["-g",
                  "-f", "bv*[height<=1080]+ba/b[height<=1080]",
-                 "--no-playlist", args.url], text=True).strip().splitlines()
+                 "--no-playlist", args.url], ck).strip().splitlines()
         except subprocess.CalledProcessError:
             fail(outdir, "Could not get the video stream links (yt-dlp failed — "
                          "YouTube may be blocking downloads right now). Try "
