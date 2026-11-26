@@ -18,6 +18,12 @@ import struct
 import subprocess
 import sys
 
+# YouTube now blocks plain yt-dlp requests from datacenter IPs
+# ("Sign in to confirm you're not a bot"). The Android player
+# client usually gets through where the web client is blocked,
+# so every yt-dlp call asks for it first, falling back to web.
+YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=android,web"]
+
 YOUTUBE_RE = re.compile(r"^https?://(www\.|m\.)?(youtube\.com|youtu\.be)/")
 
 
@@ -219,7 +225,8 @@ def main():
 
     try:
         info = json.loads(subprocess.check_output(
-            ["yt-dlp", "-j", "--skip-download", "--no-playlist",
+            ["yt-dlp"] + YT_EXTRACTOR_ARGS +
+            ["-j", "--skip-download", "--no-playlist",
              "--no-warnings", args.url], text=True))
     except subprocess.CalledProcessError:
         fail(outdir, "Could not read this YouTube link (yt-dlp failed — the video "
@@ -238,7 +245,7 @@ def main():
                      "start were used.")
         log("Live stream detected — downloading the first 2 hours from the start")
         try:
-            run(["yt-dlp", "--live-from-start",
+            run(["yt-dlp"] + YT_EXTRACTOR_ARGS + ["--live-from-start",
                  "--download-sections", "*00:00:00-02:00:00",
                  "-f", "bv*[height<=720]+ba/b[height<=720]",
                  "--merge-output-format", "mp4",
@@ -255,7 +262,8 @@ def main():
         # loudness, not listening quality, and the smaller file
         # downloads roughly twice as fast as 96 kbps.
         try:
-            run(["yt-dlp", "-f", "ba[abr<=48]/ba", "--no-playlist",
+            run(["yt-dlp"] + YT_EXTRACTOR_ARGS +
+                ["-f", "ba[abr<=48]/ba", "--no-playlist",
                  "-o", "audio.%(ext)s", args.url])
         except subprocess.CalledProcessError:
             fail(outdir, "Could not download this video's audio (yt-dlp failed — "
@@ -294,7 +302,7 @@ def main():
     else:
         try:
             urls = subprocess.check_output(
-                ["yt-dlp", "-g",
+                ["yt-dlp"] + YT_EXTRACTOR_ARGS + ["-g",
                  "-f", "bv*[height<=1080]+ba/b[height<=1080]",
                  "--no-playlist", args.url], text=True).strip().splitlines()
         except subprocess.CalledProcessError:
